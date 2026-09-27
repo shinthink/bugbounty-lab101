@@ -216,22 +216,43 @@ reconnaissance() {
     echo -e "${GREEN}  ✓ $SUBS subdomains found${NC}"
     
     echo -e "${YELLOW}[1.2] HTTP probing${NC}"
-    httpx -l "$OUTPUT_DIR/authorized_subdomains.txt" -o "$OUTPUT_DIR/httpx.txt" -silent 2>/dev/null
+    if check_tool httpx; then
+        httpx -l "$OUTPUT_DIR/authorized_subdomains.txt" -o "$OUTPUT_DIR/httpx.txt" -silent 2>/dev/null
+    else
+        echo -e "${YELLOW}  [!] httpx is not installed; continuing${NC}"
+    fi
     
     echo -e "${YELLOW}[1.3] Wayback URLs${NC}"
-    echo "$TARGET" | gau --threads 5 2>/dev/null | sort -u > "$OUTPUT_DIR/wayback_raw.txt"
-    waybackurls "$TARGET" >> "$OUTPUT_DIR/wayback_raw.txt" 2>/dev/null
+    : > "$OUTPUT_DIR/wayback_raw.txt"
+    if check_tool gau; then
+        echo "$TARGET" | gau --threads 5 2>/dev/null | sort -u > "$OUTPUT_DIR/wayback_raw.txt"
+    else
+        echo -e "${YELLOW}  [!] gau is not installed; continuing${NC}"
+    fi
+    if check_tool waybackurls; then
+        waybackurls "$TARGET" >> "$OUTPUT_DIR/wayback_raw.txt" 2>/dev/null
+    else
+        echo -e "${YELLOW}  [!] waybackurls is not installed; continuing${NC}"
+    fi
     sort -u "$OUTPUT_DIR/wayback_raw.txt" -o "$OUTPUT_DIR/wayback_raw.txt"
     scope_filter_file "$OUTPUT_DIR/wayback_raw.txt" "$OUTPUT_DIR/wayback.txt"
     
     echo -e "${YELLOW}[1.4] JS endpoints${NC}"
-    katana -u "https://$TARGET" -d 3 -jc \
-        -cs "^https?://${TARGET_REGEX}(:[0-9]+)?(/|$)" \
-        -o "$OUTPUT_DIR/js_endpoints_raw.txt" -silent 2>/dev/null
+    if check_tool katana; then
+        katana -u "https://$TARGET" -d 3 -jc \
+            -cs "^https?://${TARGET_REGEX}(:[0-9]+)?(/|$)" \
+            -o "$OUTPUT_DIR/js_endpoints_raw.txt" -silent 2>/dev/null
+    else
+        echo -e "${YELLOW}  [!] katana is not installed; continuing${NC}"
+    fi
     scope_filter_file "$OUTPUT_DIR/js_endpoints_raw.txt" "$OUTPUT_DIR/js_endpoints.txt"
     
     echo -e "${YELLOW}[1.5] Parameter discovery${NC}"
-    cat "$OUTPUT_DIR/wayback.txt" | grep "?" | unfurl keys | sort -u > "$OUTPUT_DIR/params.txt" 2>/dev/null
+    if check_tool unfurl; then
+        cat "$OUTPUT_DIR/wayback.txt" | grep "?" | unfurl keys | sort -u > "$OUTPUT_DIR/params.txt" 2>/dev/null
+    else
+        echo -e "${YELLOW}  [!] unfurl is not installed; continuing${NC}"
+    fi
     
     echo -e "${GREEN}[✓] Reconnaissance completed${NC}"
 }
@@ -255,12 +276,35 @@ vuln_scan() {
     nuclei -u "https://$TARGET" -t nuclei-templates/http/misconfiguration/cors* -o "$OUTPUT_DIR/cors.txt" -silent 2>/dev/null
     
     echo -e "${YELLOW}[2.3] XSS detection${NC}"
-    cat "$OUTPUT_DIR/../recon/params.txt" 2>/dev/null | head -100 | while read param; do
-        echo "https://$TARGET/?$param=test" | dalfox pipe --silence -o "$OUTPUT_DIR/xss.txt" 2>/dev/null
-    done
+    if check_tool dalfox; then
+        # Build the URL list once, then run dalfox once with a single -o write;
+        # the previous per-parameter loop overwrote xss.txt on every iteration,
+        # leaving only the last parameter's results.
+        cat "$OUTPUT_DIR/../recon/params.txt" 2>/dev/null | head -100 | while read param; do
+            [ -n "$param" ] && echo "https://$TARGET/?$param=test"
+        done > "$OUTPUT_DIR/xss_urls.txt"
+        if [ -s "$OUTPUT_DIR/xss_urls.txt" ]; then
+            dalfox pipe --silence -o "$OUTPUT_DIR/xss.txt" < "$OUTPUT_DIR/xss_urls.txt" 2>/dev/null
+        else
+            echo -e "${YELLOW}  [!] No parameters found for XSS testing${NC}"
+        fi
+    else
+        echo -e "${YELLOW}  [!] dalfox is not installed; continuing${NC}"
+    fi
     
     echo -e "${YELLOW}[2.4] SQL Injection${NC}"
-    cat "$OUTPUT_DIR/../recon/wayback.txt" 2>/dev/null | grep "=" | head -50 | sqlmap --batch --level=1 --risk=1 --output-dir="$OUTPUT_DIR/sqlmap" 2>/dev/null
+    if check_tool sqlmap; then
+        # sqlmap does not read targets from stdin — write candidates to a file
+        # and pass it with -m (bulk mode). The previous pipe never fed any URL.
+        cat "$OUTPUT_DIR/../recon/wayback.txt" 2>/dev/null | grep "=" | head -50 > "$OUTPUT_DIR/sqlmap_targets.txt"
+        if [ -s "$OUTPUT_DIR/sqlmap_targets.txt" ]; then
+            sqlmap -m "$OUTPUT_DIR/sqlmap_targets.txt" --batch --level=1 --risk=1 --output-dir="$OUTPUT_DIR/sqlmap" 2>/dev/null
+        else
+            echo -e "${YELLOW}  [!] No URLs with parameters found for SQL injection testing${NC}"
+        fi
+    else
+        echo -e "${YELLOW}  [!] sqlmap is not installed; continuing${NC}"
+    fi
     
     echo -e "${YELLOW}[2.5] SSRF detection${NC}"
     echo "https://$TARGET" | nuclei -t nuclei-templates/http/vulnerabilities/ssrf* -o "$OUTPUT_DIR/ssrf.txt" -silent 2>/dev/null
